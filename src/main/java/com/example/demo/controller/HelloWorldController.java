@@ -15,6 +15,6 @@ public class HelloWorldController {
     @GetMapping("/hello")
     @Operation(summary = "Get Greeting Message", description = "Returns a friendly greeting message")
     public String getGreeting(@RequestParam(name = "name", defaultValue = "World") String name) {
-        return String.format("Hello, %s! Welcome to Spring Boot REST API.", name);
+        return String.format("Hello, %s! Welcome to Spring Boot App.", name);
     }
 }
