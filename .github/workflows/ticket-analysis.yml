@@ -1,44 +1,44 @@
----
 name: Ticket Analysis Pipeline
 on:
   issues:
-    types:
-      - opened
-      - reopened
+    types: [opened, reopened]
 permissions:
   issues: write
   contents: read
 jobs:
+  # -------------------------------------------------------------
+  # JOB 1: Generate Implementation Plan via Copilot Headless Agent
+  # -------------------------------------------------------------
   generate-plan:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      - name: Install GitHub CLI & Copilot Extension
-        run: |
-          gh extension install github/gh-copilot || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js environment
+        uses: actions/setup-node@v4
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
       - name: Run Copilot Ticket Analyzer Agent
         id: run-copilot
         env:
-          GH_TOKEN: ${{ secrets.COPILOT_TOKEN || secrets.GITHUB_TOKEN }}
+          # COPILOT_GITHUB_TOKEN is the auth variable the copilot CLI reads.
+          # Use a PAT with "Copilot Requests" permission (see repo secret
+          # COPILOT_PAT), or GITHUB_TOKEN if your org has enabled the
+          # policy allowing GITHUB_TOKEN to authenticate Copilot CLI.
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT || secrets.GITHUB_TOKEN }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-        run: >
+        run: |
           # Read system instructions safely
-
           AGENT_PROMPT=$(cat .github/agents/ticket-analyzer-agent.md)
 
-
           # Construct prompt safely without shell expansion bugs.
-
           # ISSUE_TITLE / ISSUE_BODY come from untrusted user input, so they
-
           # are only ever referenced as quoted env var expansions inside a
-
           # script block -- never interpolated into a heredoc or eval'd.
-
           {
             echo "System Instructions:"
             echo "$AGENT_PROMPT"
@@ -49,56 +49,47 @@ jobs:
             echo "$ISSUE_BODY"
           } > prompt.txt
 
-
-          # Execute Copilot CLI in non-interactive mode.
-
+          # Execute Copilot CLI in non-interactive (programmatic) mode.
+          # --allow-tool='read' lets it read repo files to inform the plan;
+          # it is NOT given write/shell access, since this job should only
+          # produce a plan, not touch the codebase.
+          # --no-ask-user prevents it from pausing for input that will
+          # never come on a headless runner.
           # NOTE: stderr is captured to a log file instead of being
-
           # silently dropped, so failures are distinguishable from
-
           # "the agent legitimately produced no output".
-
-          gh copilot suggest -t shell "$(cat prompt.txt)" > plan.md 2> copilot-error.log || true
-
+          # -s/--silent suppresses session metadata (model banner, stats)
+          # so plan.md contains only clean text -- important since it's
+          # posted verbatim to the issue as a comment later.
+          copilot -s -p "$(cat prompt.txt)" --allow-tool='read' --no-ask-user > plan.md 2> copilot-error.log || true
 
           if [ -s copilot-error.log ]; then
             echo "::warning::gh copilot suggest reported errors, see copilot-error.log"
             cat copilot-error.log
           fi
 
-
           # Fallback check to ensure plan.md is populated
-
           if [ ! -s plan.md ]; then
             cat <<'EOF' > plan.md
           ### 1. High-Level Summary
-
           - **Goal**: Analyze and implement the reported ticket.
-
           - **Approach**: Review ticket description and update target Spring Boot components.
-
           ### 2. File-Level Changes
-
           #### `src/main/java/com/example/demo/controller/HelloWorldController.java`
-
           - **Action**: `MODIFY`
-
           - **Description**: Implement functionality for the reported ticket.
-
           ### 3. Test Cases & Verification
-
           - **Test Case 1**: Verify controller endpoint return values and status codes.
-
           - **Verification Command**: `mvn test`
-
           EOF
-
           fi
+
       - name: Upload Implementation Plan Artifact
         uses: actions/upload-artifact@v4
         with:
           name: implementation-plan-${{ github.event.issue.number }}
           path: plan.md
+
       - name: Upload Copilot Error Log
         if: always()
         uses: actions/upload-artifact@v4
@@ -106,6 +97,10 @@ jobs:
           name: copilot-error-log-${{ github.event.issue.number }}
           path: copilot-error.log
           if-no-files-found: ignore
+
+  # -------------------------------------------------------------
+  # JOB 2: Human Approval Gate (Environment Protection Rule)
+  # -------------------------------------------------------------
   approve-plan:
     needs: generate-plan
     runs-on: ubuntu-latest
@@ -116,31 +111,29 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           echo "Human review approved for Issue #$ISSUE_NUMBER"
+
+  # -------------------------------------------------------------
+  # JOB 3: Attach Implementation Plan to Ticket
+  # -------------------------------------------------------------
   post-to-issue:
-    needs:
-      - generate-plan
-      - approve-plan
+    needs: [generate-plan, approve-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Download Implementation Plan Artifact
         uses: actions/download-artifact@v4
         with:
           name: implementation-plan-${{ github.event.issue.number }}
+
       - name: Comment Implementation Plan on Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: >
+        run: |
           # plan.md contains LLM-generated content derived from untrusted
-
           # issue input. It is only ever streamed via `cat` into a file --
-
           # never interpolated into a heredoc or shell variable -- so any
-
           # backticks / $(...) sequences inside it are treated as inert text,
-
           # not executed.
-
           {
             echo "## 🤖 Copilot Implementation Plan"
             echo ""
@@ -149,6 +142,5 @@ jobs:
             echo "---"
             echo "*Generated by \`ticket-analyzer-agent\` and approved by human reviewer.*"
           } > comment.md
-
 
           gh issue comment "$ISSUE_NUMBER" --body-file comment.md
