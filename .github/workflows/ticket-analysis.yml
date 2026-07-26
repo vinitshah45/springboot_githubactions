@@ -1,19 +1,27 @@
 name: Ticket Analysis Pipeline
+
 on:
   issues:
-    types: [opened, reopened]
+    types:
+      - opened
+      - reopened
+
 permissions:
   issues: write
   contents: read
+
 jobs:
   # -------------------------------------------------------------
-  # JOB 1: Generate Implementation Plan via Copilot Headless Agent
+  # JOB 1: Generate Implementation Plan via Native Copilot CLI
   # -------------------------------------------------------------
   generate-plan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      # Authenticate GitHub CLI
       - name: Authenticate GitHub CLI with Copilot Token
         env:
           COPILOT_TOKEN: ${{ secrets.COPILOT_TOKEN }}
@@ -21,81 +29,194 @@ jobs:
           if [ -n "$COPILOT_TOKEN" ]; then
             echo "$COPILOT_TOKEN" | gh auth login --with-token
           fi
-      - name: Install GitHub CLI & Copilot Extension
+
+      # Verify GitHub CLI & Copilot readiness
+      - name: Verify GitHub CLI & Ensure Copilot Readiness
         run: |
-          gh extension install github/gh-copilot || true
+          echo "=== GitHub CLI Version ==="
+          gh --version
+
+          echo ""
+          echo "=== Verifying GitHub Copilot CLI ==="
+
+          if ! gh copilot --help >/dev/null 2>&1; then
+            echo "⚠️ 'gh copilot' not found. Installing native Copilot CLI..."
+
+            sudo npm install -g @github/copilot \
+              || gh extension install github/gh-copilot --force
+          fi
+
+          echo ""
+          echo "=== GitHub Copilot Verified ==="
+          gh copilot --help
+
+      # Generate Implementation Plan
       - name: Run Copilot Ticket Analyzer Agent
         id: run-copilot
         env:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          # Read system instructions from ticket-analyzer-agent
-          AGENT_PROMPT=$(cat .github/agents/ticket-analyzer-agent.md)
-          PROMPT="System Instructions:
+
+          SYSTEM_FILE=".github/agents/ticket-analyzer-agent.md"
+
+          if [ -f "$SYSTEM_FILE" ]; then
+            AGENT_PROMPT=$(cat "$SYSTEM_FILE")
+          else
+            AGENT_PROMPT="Analyze the following issue and provide a structured technical plan."
+          fi
+
+          cat <<EOF > full_prompt.txt
+          System Instructions:
+
           $AGENT_PROMPT
-          Ticket Details to Analyze:
-          Title: $ISSUE_TITLE
+
+          ----------------------------------------------------
+
+          Analyze the following GitHub Issue.
+
+          Title:
+          $ISSUE_TITLE
+
           Description:
-          $ISSUE_BODY"
-          # Execute Copilot CLI in non-interactive headless mode
-          echo "$PROMPT" | gh copilot suggest -t shell "" > plan.md 2>/dev/null || true
-          # Fallback check to ensure plan.md is populated
+          $ISSUE_BODY
+
+          ----------------------------------------------------
+
+          Generate ONLY Markdown using these exact headers:
+
+          # High-Level Summary
+
+          # Functional Requirements
+
+          # File-Level Changes
+
+          # Implementation Steps
+
+          # Test Cases
+
+          # Validation Steps
+          EOF
+
+          echo "Generating implementation plan..."
+
+          gh copilot -p "$(cat full_prompt.txt)" \
+            > plan.md \
+            2> error.log || true
+
+          if [ -s error.log ]; then
+            echo "========== COPILOT CLI ERROR =========="
+            cat error.log
+            echo "======================================="
+          fi
+
           if [ ! -s plan.md ]; then
+
+            echo "Copilot returned no output. Using fallback."
+
             cat <<EOF > plan.md
-          ### 1. High-Level Summary
-          - **Goal**: Analyze and implement ticket "$ISSUE_TITLE".
-          - **Approach**: Review ticket description and update target Spring Boot components.
-          ### 2. File-Level Changes
+          # High-Level Summary
+
+          - **Goal:** Analyze and implement ticket "$ISSUE_TITLE".
+
+          - **Approach:** Review issue details and update target components.
+
+          > ⚠️ **Note:** Copilot CLI execution failed or returned empty output.
+          >
+          > **Captured Error Log**
+          >
+          > \`\`\`text
+          $(cat error.log)
+          > \`\`\`
+
+          # Functional Requirements
+
+          - Fulfill requirements specified in issue title: "$ISSUE_TITLE".
+
+          # File-Level Changes
+
           #### \`src/main/java/com/example/demo/controller/HelloWorldController.java\`
-          - **Action**: \`MODIFY\`
-          - **Description**: Implement functionality for "$ISSUE_TITLE".
-          ### 3. Test Cases & Verification
-          - **Test Case 1**: Verify controller endpoint return values and status codes.
-          - **Verification Command**: \`mvn test\`
+
+          - **Action:** MODIFY
+
+          - **Description:** Implement functionality for "$ISSUE_TITLE".
+
+          # Implementation Steps
+
+          1. Review requirements.
+          2. Update Java source files.
+          3. Execute the test suite.
+
+          # Test Cases
+
+          - Run:
+
+          \`\`\`
+          mvn test
+          \`\`\`
+
+          # Validation Steps
+
+          - Verify endpoint response.
+          - Verify integration test status.
           EOF
           fi
+
+          echo "========== GENERATED PLAN =========="
+          cat plan.md
+          echo "==================================="
+
       - name: Upload Implementation Plan Artifact
         uses: actions/upload-artifact@v4
         with:
           name: implementation-plan-${{ github.event.issue.number }}
           path: plan.md
+
   # -------------------------------------------------------------
-  # JOB 2: Human Approval Gate (Environment Protection Rule)
+  # JOB 2: Human Approval Gate
   # -------------------------------------------------------------
   approve-plan:
     needs: generate-plan
     runs-on: ubuntu-latest
     environment: plan-approval-gate
+
     steps:
       - name: Human Review Approved
-        env:
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          echo "Human review approved for Issue #$ISSUE_NUMBER"
+          echo "Human review approved for Issue #${{ github.event.issue.number }}"
+
   # -------------------------------------------------------------
-  # JOB 3: Attach Implementation Plan to Ticket
+  # JOB 3: Attach Implementation Plan to Issue
   # -------------------------------------------------------------
   post-to-issue:
-    needs: [generate-plan, approve-plan]
+    needs:
+      - generate-plan
+      - approve-plan
+
     runs-on: ubuntu-latest
+
     steps:
       - name: Download Implementation Plan Artifact
         uses: actions/download-artifact@v4
         with:
           name: implementation-plan-${{ github.event.issue.number }}
+
       - name: Comment Implementation Plan on Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          PLAN_CONTENT=$(cat plan.md)
-
-          COMMENT_BODY=$(cat <<EOF
+          cat <<EOF > comment_body.md
           ## 🤖 Copilot Implementation Plan (Reviewed & Approved)
-          $PLAN_CONTENT
+
+          $(cat plan.md)
+
           ---
+
           *Generated by \`ticket-analyzer-agent\` and approved by human reviewer.*
           EOF
-          )
-          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$COMMENT_BODY"
+
+          gh issue comment \
+            "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file comment_body.md
