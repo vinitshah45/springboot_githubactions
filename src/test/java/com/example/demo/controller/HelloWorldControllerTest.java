@@ -21,4 +21,11 @@ class HelloWorldControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string("Welcome to world of AI"));
     }
+
+    @Test
+    void shouldReturnHealthMessage() throws Exception {
+        mockMvc.perform(get("/api/health"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("Helllo world - it's up now"));
+    }
 }
