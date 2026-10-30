@@ -16,4 +16,10 @@ public class HelloWorldController {
     public String getGreeting() {
         return "Welcome to world of AI";
     }
+
+    @GetMapping("/health")
+    @Operation(summary = "Check Health", description = "Returns a message indicating the service is up")
+    public String checkHealth() {
+        return "Helllo world - it's up now";
+    }
 }
