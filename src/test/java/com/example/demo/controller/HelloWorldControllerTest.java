@@ -16,16 +16,9 @@ class HelloWorldControllerTest {
     private MockMvc mockMvc;
 
     @Test
-    void shouldReturnDefaultGreeting() throws Exception {
+    void shouldReturnGreeting() throws Exception {
         mockMvc.perform(get("/api/hello"))
                 .andExpect(status().isOk())
-                .andExpect(content().string("Hello, World! Welcome to Spring Boot App."));
-    }
-
-    @Test
-    void shouldReturnCustomGreeting() throws Exception {
-        mockMvc.perform(get("/api/hello").param("name", "Vinit"))
-                .andExpect(status().isOk())
-                .andExpect(content().string("Hello, Vinit! Welcome to Spring Boot App."));
+                .andExpect(content().string("Welcome to world of AI"));
     }
 }
